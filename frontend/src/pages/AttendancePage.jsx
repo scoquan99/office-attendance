@@ -1,0 +1,231 @@
+import { useEffect, useMemo, useState } from 'react';
+import dayjs from 'dayjs';
+import { AttendanceAPI, EmployeesAPI } from '../api.js';
+
+function statusPillClass(status) {
+  if (status === 'Đi làm') return 'pill-success';
+  if (status === 'Đi trễ') return 'pill-warning';
+  if (status === 'Nghỉ phép') return 'pill-info';
+  return 'pill-danger';
+}
+
+export default function AttendancePage() {
+  const [now, setNow] = useState(dayjs());
+  const [employees, setEmployees] = useState([]);
+  const [selectedEmployee, setSelectedEmployee] = useState('');
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [punchMessage, setPunchMessage] = useState('');
+
+  const [filters, setFilters] = useState({
+    from: dayjs().startOf('month').format('YYYY-MM-DD'),
+    to: dayjs().format('YYYY-MM-DD'),
+    employee_id: '',
+    department: '',
+  });
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(dayjs()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    EmployeesAPI.list({ status: 'active' }).then(setEmployees).catch(() => {});
+  }, []);
+
+  async function loadRecords() {
+    setLoading(true);
+    setError('');
+    try {
+      const params = {};
+      if (filters.from) params.from = filters.from;
+      if (filters.to) params.to = filters.to;
+      if (filters.employee_id) params.employee_id = filters.employee_id;
+      if (filters.department) params.department = filters.department;
+      const data = await AttendanceAPI.list(params);
+      setRecords(data);
+    } catch (err) {
+      setError('Không tải được dữ liệu chấm công. Kiểm tra kết nối backend/PostgreSQL.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadRecords();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
+  const departments = useMemo(
+    () => [...new Set(employees.map((e) => e.department).filter(Boolean))],
+    [employees]
+  );
+
+  async function handleCheckin() {
+    if (!selectedEmployee) return setPunchMessage('Vui lòng chọn nhân viên trước.');
+    try {
+      await AttendanceAPI.checkin(selectedEmployee);
+      setPunchMessage('Đã chấm công vào lúc ' + dayjs().format('HH:mm:ss'));
+      loadRecords();
+    } catch (err) {
+      setPunchMessage(err?.response?.data?.error || 'Có lỗi khi chấm công vào.');
+    }
+  }
+
+  async function handleCheckout() {
+    if (!selectedEmployee) return setPunchMessage('Vui lòng chọn nhân viên trước.');
+    try {
+      await AttendanceAPI.checkout(selectedEmployee);
+      setPunchMessage('Đã chấm công ra lúc ' + dayjs().format('HH:mm:ss'));
+      loadRecords();
+    } catch (err) {
+      setPunchMessage(err?.response?.data?.error || 'Có lỗi khi chấm công ra.');
+    }
+  }
+
+  async function handleDelete(id) {
+    if (!window.confirm('Xóa bản ghi chấm công này?')) return;
+    await AttendanceAPI.remove(id);
+    loadRecords();
+  }
+
+  function handleExport() {
+    const params = {};
+    if (filters.from) params.from = filters.from;
+    if (filters.to) params.to = filters.to;
+    if (filters.employee_id) params.employee_id = filters.employee_id;
+    if (filters.department) params.department = filters.department;
+    window.open(AttendanceAPI.exportUrl(params), '_blank');
+  }
+
+  return (
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <h1>Chấm công</h1>
+          <p className="page-sub">Theo dõi giờ vào - ra và xuất danh sách để kiểm tra</p>
+        </div>
+      </header>
+
+      <div className="punch-card">
+        <div className="punch-clock">
+          <div className="punch-date">{now.format('dddd, DD/MM/YYYY')}</div>
+          <div className="punch-time">{now.format('HH:mm:ss')}</div>
+        </div>
+        <div className="punch-controls">
+          <select className="input" value={selectedEmployee} onChange={(e) => setSelectedEmployee(e.target.value)}>
+            <option value="">— Chọn nhân viên —</option>
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.employee_code} · {e.full_name}
+              </option>
+            ))}
+          </select>
+          <div className="punch-buttons">
+            <button className="btn btn-punch-in" onClick={handleCheckin}>Chấm công vào</button>
+            <button className="btn btn-punch-out" onClick={handleCheckout}>Chấm công ra</button>
+          </div>
+          {punchMessage && <div className="punch-message">{punchMessage}</div>}
+        </div>
+      </div>
+
+      <div className="toolbar">
+        <label className="toolbar-field">
+          Từ ngày
+          <input
+            type="date"
+            className="input"
+            value={filters.from}
+            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+          />
+        </label>
+        <label className="toolbar-field">
+          Đến ngày
+          <input
+            type="date"
+            className="input"
+            value={filters.to}
+            onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+          />
+        </label>
+        <label className="toolbar-field">
+          Nhân viên
+          <select
+            className="input"
+            value={filters.employee_id}
+            onChange={(e) => setFilters((f) => ({ ...f, employee_id: e.target.value }))}
+          >
+            <option value="">Tất cả</option>
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>{e.full_name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="toolbar-field">
+          Phòng ban
+          <select
+            className="input"
+            value={filters.department}
+            onChange={(e) => setFilters((f) => ({ ...f, department: e.target.value }))}
+          >
+            <option value="">Tất cả</option>
+            {departments.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </label>
+        <button className="btn btn-accent" onClick={handleExport}>⬇ Xuất Excel</button>
+      </div>
+
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      <div className="card">
+        <div className="table-scroll">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Ngày</th>
+              <th>Mã NV</th>
+              <th>Họ tên</th>
+              <th>Phòng ban</th>
+              <th>Giờ vào</th>
+              <th>Giờ ra</th>
+              <th>Trạng thái</th>
+              <th>Ghi chú</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={9} className="empty-row">Đang tải...</td>
+              </tr>
+            ) : records.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="empty-row">Không có dữ liệu trong khoảng thời gian này</td>
+              </tr>
+            ) : (
+              records.map((r) => (
+                <tr key={r.id}>
+                  <td>{dayjs(r.work_date).format('DD/MM/YYYY')}</td>
+                  <td className="mono">{r.employee_code}</td>
+                  <td>{r.full_name}</td>
+                  <td>{r.department || '—'}</td>
+                  <td className="mono">{r.check_in ? String(r.check_in).slice(0, 5) : '—'}</td>
+                  <td className="mono">{r.check_out ? String(r.check_out).slice(0, 5) : '—'}</td>
+                  <td><span className={`pill ${statusPillClass(r.status)}`}>{r.status}</span></td>
+                  <td>{r.note || '—'}</td>
+                  <td className="row-actions">
+                    <button className="btn btn-ghost btn-danger" onClick={() => handleDelete(r.id)}>Xóa</button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  );
+}
