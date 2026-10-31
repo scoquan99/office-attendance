@@ -1,34 +1,65 @@
 import { Router } from 'express';
 import ExcelJS from 'exceljs';
 import { pool } from '../db.js';
+import { requireManagerRole, canAccessEmployee } from '../middleware/auth.js';
+import { todayStr, timeStr, isLate } from '../utils/time.js';
+import { parseId } from '../utils/id.js';
+import { isValidDate, isValidTime } from '../utils/validate.js';
 
 const router = Router();
 
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
-}
-function timeStr() {
-  return new Date().toTimeString().slice(0, 8);
+const VALID_STATUS = ['Đi làm', 'Đi trễ', 'Nghỉ phép', 'Nghỉ không phép'];
+
+
+// Chống "Excel formula injection": ô bắt đầu bằng = + - @ sẽ bị Excel hiểu là công thức.
+function safeCell(value) {
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(value)) return `'${value}`;
+  return value;
 }
 
+// 'YYYY-MM-DD' → 'DD/MM/YYYY' bằng cách cắt chuỗi, không qua Date nên không bị lệch ngày theo múi giờ máy chủ
+function formatDateVN(value) {
+  if (!value) return '';
+  const [y, m, d] = String(value).slice(0, 10).split('-');
+  return `${d}/${m}/${y}`;
+}
+
+// Nhân viên thường chỉ được xem chấm công của CHÍNH MÌNH (tự gắn employee_id, bỏ lọc phòng ban); quản lý xem được tất cả.
+// Trả về { query } hoặc { status, error } nếu đang cố xem dữ liệu của người khác.
+function scopeQueryToUser(req) {
+  if (req.user.isManager) return { query: req.query };
+  if (req.query.employee_id && parseId(req.query.employee_id) !== req.user.id) {
+    return { status: 403, error: 'Bạn chỉ được xem dữ liệu chấm công của chính mình' };
+  }
+  return { query: { ...req.query, employee_id: String(req.user.id), department: undefined } };
+}
+
+// Trả về { where, params } hoặc { error } nếu tham số lọc không hợp lệ
 function buildFilters(query) {
   const { from, to, employee_id, department } = query;
   const conditions = [];
   const params = [];
 
   if (from) {
+    if (!isValidDate(from)) return { error: 'Tham số "from" phải là ngày hợp lệ dạng YYYY-MM-DD' };
     params.push(from);
     conditions.push(`a.work_date >= $${params.length}`);
   }
   if (to) {
+    if (!isValidDate(to)) return { error: 'Tham số "to" phải là ngày hợp lệ dạng YYYY-MM-DD' };
     params.push(to);
     conditions.push(`a.work_date <= $${params.length}`);
   }
   if (employee_id) {
-    params.push(employee_id);
+    const id = parseId(employee_id);
+    if (!id) return { error: 'employee_id không hợp lệ' };
+    params.push(id);
     conditions.push(`a.employee_id = $${params.length}`);
   }
   if (department) {
+    if (typeof department !== 'string' || department.length > 100) {
+      return { error: 'department không hợp lệ' };
+    }
     params.push(department);
     conditions.push(`e.department = $${params.length}`);
   }
@@ -37,10 +68,34 @@ function buildFilters(query) {
   return { where, params };
 }
 
+// Kiểm tra được phép chấm công cho nhân viên này: có quyền, nhân viên tồn tại và còn đang làm việc.
+// Trả về true nếu hợp lệ; ngược lại ĐÃ gửi phản hồi lỗi và trả về false.
+// Quyền được kiểm tra TRƯỚC mọi truy vấn khác để người không có quyền không dò được dữ liệu của người khác.
+async function checkPunchAllowed(req, res, employeeId) {
+  if (!canAccessEmployee(req, employeeId)) {
+    res.status(403).json({ error: 'Bạn chỉ được chấm công cho chính mình' });
+    return false;
+  }
+  const { rows: emptyRows } = await pool.query('SELECT status FROM employees WHERE id = $1', [employeeId]);
+  if (!emptyRows.length) {
+    res.status(404).json({ error: 'Không tìm thấy nhân viên' });
+    return false;
+  }
+  if (emptyRows[0].status !== 'active') {
+    res.status(400).json({ error: 'Nhân viên đã nghỉ việc, không thể chấm công' });
+    return false;
+  }
+  return true;
+}
+
 // GET /api/attendance?from=&to=&employee_id=&department=
 router.get('/', async (req, res, next) => {
   try {
-    const { where, params } = buildFilters(req.query);
+    const scoped = scopeQueryToUser(req);
+    if (scoped.error) return res.status(scoped.status).json({ error: scoped.error });
+    const { where, params, error } = buildFilters(scoped.query);
+    if (error) return res.status(400).json({ error });
+
     const { rows } = await pool.query(
       `SELECT a.*, e.employee_code, e.full_name, e.department, e.position
        FROM attendance a JOIN employees e ON e.id = a.employee_id
@@ -55,19 +110,40 @@ router.get('/', async (req, res, next) => {
 });
 
 // POST /api/attendance/checkin { employee_id }
+// Nhân viên thường chỉ được chấm công cho CHÍNH MÌNH; quản lý được chấm công hộ người khác.
 router.post('/checkin', async (req, res, next) => {
   try {
-    const { employee_id } = req.body;
-    if (!employee_id) return res.status(400).json({ error: 'Thiếu employee_id' });
+    const employeeId = parseId(req.body?.employee_id);
+    if (!employeeId) return res.status(400).json({ error: 'Thiếu hoặc sai employee_id' });
+    if (!(await checkPunchAllowed(req, res, employeeId))) return;
 
+    // Tính ngày và giờ một lần duy nhất để tránh lệch khi request đến đúng lúc sang ngày mới
+    const today = todayStr();
+    const now = timeStr();
+    // Trạng thái tự tính theo giờ vào: sau giờ bắt đầu làm việc (WORK_START_TIME + LATE_GRACE_MINUTES) là "Đi trễ".
+    // Nếu quản lý đã tạo sẵn bản ghi hôm nay với trạng thái khác (ví dụ "Nghỉ phép") thì giữ nguyên trạng thái đó.
+    const status = isLate(now) ? 'Đi trễ' : 'Đi làm';
+
+    // Upsert nguyên tử: tạo bản ghi nếu chưa có, ghi giờ vào nếu chưa chấm công.
+    // COALESCE giữ giờ vào cũ nếu đã có → hai request đồng thời không ghi đè nhau.
     const { rows } = await pool.query(
       `INSERT INTO attendance (employee_id, work_date, check_in, status)
-       VALUES ($1, $2, $3, 'Đi làm')
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (employee_id, work_date)
-       DO UPDATE SET check_in = COALESCE(attendance.check_in, EXCLUDED.check_in)
+       DO UPDATE SET
+         check_in = COALESCE(attendance.check_in, EXCLUDED.check_in),
+         status = CASE
+           WHEN attendance.check_in IS NULL AND attendance.status IN ('Đi làm', 'Đi trễ') THEN EXCLUDED.status
+           ELSE attendance.status
+         END
        RETURNING *`,
-      [employee_id, todayStr(), timeStr()]
+      [employeeId, today, now, status]
     );
+
+    // Nếu giờ vào trả về khác giờ vừa gửi → bản ghi đã có check_in từ trước
+    if (rows[0].check_in !== now) {
+      return res.status(400).json({ error: 'Nhân viên đã chấm công vào hôm nay' });
+    }
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -77,14 +153,16 @@ router.post('/checkin', async (req, res, next) => {
 // POST /api/attendance/checkout { employee_id }
 router.post('/checkout', async (req, res, next) => {
   try {
-    const { employee_id } = req.body;
-    if (!employee_id) return res.status(400).json({ error: 'Thiếu employee_id' });
+    const employeeId = parseId(req.body?.employee_id);
+    if (!employeeId) return res.status(400).json({ error: 'Thiếu hoặc sai employee_id' });
+    if (!(await checkPunchAllowed(req, res, employeeId))) return;
 
+    const today = todayStr();
     const { rows } = await pool.query(
       `UPDATE attendance SET check_out = $1
-       WHERE employee_id = $2 AND work_date = $3
+       WHERE employee_id = $2 AND work_date = $3 AND check_in IS NOT NULL AND check_out IS NULL
        RETURNING *`,
-      [timeStr(), employee_id, todayStr()]
+      [timeStr(), employeeId, today]
     );
     if (!rows.length) {
       return res.status(400).json({ error: 'Nhân viên chưa chấm công vào trong hôm nay' });
@@ -95,30 +173,69 @@ router.post('/checkout', async (req, res, next) => {
   }
 });
 
-// POST /api/attendance  (tạo/sửa thủ công bởi quản trị viên)
-router.post('/', async (req, res, next) => {
+// POST /api/attendance  (tạo/sửa thủ công — CHỈ dành cho quản lý)
+router.post('/', requireManagerRole, async (req, res, next) => {
   try {
-    const { employee_id, work_date, check_in, check_out, status, note } = req.body;
-    if (!employee_id || !work_date) {
+    const { work_date, check_in, check_out, status, note } = req.body;
+    const employeeId = parseId(req.body.employee_id);
+    if (!employeeId || !work_date) {
       return res.status(400).json({ error: 'Thiếu employee_id hoặc work_date' });
     }
+    if (!isValidDate(work_date)) {
+      return res.status(400).json({ error: 'work_date phải là ngày hợp lệ dạng YYYY-MM-DD' });
+    }
+    if ((check_in && !isValidTime(check_in)) || (check_out && !isValidTime(check_out))) {
+      return res.status(400).json({ error: 'Giờ vào/ra phải hợp lệ, dạng HH:MM hoặc HH:MM:SS' });
+    }
+    if (status && !VALID_STATUS.includes(status)) {
+      return res.status(400).json({ error: 'Trạng thái chấm công không hợp lệ' });
+    }
+    if (note != null && (typeof note !== 'string' || note.length > 1000)) {
+      return res.status(400).json({ error: 'Ghi chú phải là chuỗi tối đa 1000 ký tự' });
+    }
+
+    // Kiểm tra nhân viên tồn tại và còn đang làm việc (đồng nhất quy tắc với checkin/checkout)
+    const { rows: empRows } = await pool.query('SELECT status FROM employees WHERE id = $1', [employeeId]);
+    if (!empRows.length) {
+      return res.status(404).json({ error: 'Không tìm thấy nhân viên' });
+    }
+    if (empRows[0].status !== 'active') {
+      return res.status(400).json({ error: 'Nhân viên đã nghỉ việc, không thể chấm công' });
+    }
+
+    // Kiểm tra xem giờ vào có sớm hơn giờ ra không
+    const toSeconds = (t) => {
+      const parts = t.split(':').map(Number);
+      return parts[0] * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
+    };
+    if (check_in && check_out && toSeconds(check_in) > toSeconds(check_out)) {
+      return res.status(400).json({ error: 'Giờ vào phải sớm hơn giờ ra' });
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO attendance (employee_id, work_date, check_in, check_out, status, note)
        VALUES ($1,$2,$3,$4,COALESCE($5,'Đi làm'),$6)
        ON CONFLICT (employee_id, work_date)
        DO UPDATE SET check_in=$3, check_out=$4, status=COALESCE($5,'Đi làm'), note=$6
        RETURNING *`,
-      [employee_id, work_date, check_in || null, check_out || null, status, note || null]
+      [employeeId, work_date, check_in || null, check_out || null, status || null, note || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
+    if (err.code === '23503') {
+      return res.status(404).json({ error: 'Không tìm thấy nhân viên' });
+    }
     next(err);
   }
 });
 
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/attendance/:id — CHỈ dành cho quản lý
+router.delete('/:id', requireManagerRole, async (req, res, next) => {
   try {
-    const { rowCount } = await pool.query('DELETE FROM attendance WHERE id=$1', [req.params.id]);
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'ID không hợp lệ' });
+
+    const { rowCount } = await pool.query('DELETE FROM attendance WHERE id=$1', [id]);
     if (!rowCount) return res.status(404).json({ error: 'Không tìm thấy bản ghi' });
     res.status(204).send();
   } catch (err) {
@@ -127,9 +244,13 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // GET /api/attendance/export/xlsx?from=&to=&employee_id=&department=
-router.get('/export/xlsx', async (req, res, next) => {
+router.get('/export/xlsx', requireManagerRole, async (req, res, next) => {
   try {
-    const { where, params } = buildFilters(req.query);
+    const scoped = scopeQueryToUser(req);
+    if (scoped.error) return res.status(scoped.status).json({ error: scoped.error });
+    const { where, params, error } = buildFilters(scoped.query);
+    if (error) return res.status(400).json({ error });
+
     const { rows } = await pool.query(
       `SELECT e.employee_code, e.full_name, e.department, e.position,
               a.work_date, a.check_in, a.check_out, a.status, a.note
@@ -162,8 +283,15 @@ router.get('/export/xlsx', async (req, res, next) => {
 
     rows.forEach((r) => {
       sheet.addRow({
-        ...r,
-        work_date: r.work_date ? new Date(r.work_date).toLocaleDateString('vi-VN') : '',
+        employee_code: safeCell(r.employee_code),
+        full_name: safeCell(r.full_name),
+        department: safeCell(r.department),
+        position: safeCell(r.position),
+        work_date: formatDateVN(r.work_date),
+        check_in: safeCell(r.check_in),
+        check_out: safeCell(r.check_out),
+        status: safeCell(r.status),
+        note: safeCell(r.note),
       });
     });
 
@@ -174,7 +302,10 @@ router.get('/export/xlsx', async (req, res, next) => {
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+    );
 
     await workbook.xlsx.write(res);
     res.end();

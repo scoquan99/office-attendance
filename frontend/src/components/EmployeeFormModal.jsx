@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { DEPARTMENT_NAMES, positionsForDepartment } from '../orgStructure.js';
+import { useOrg } from '../useOrg.js';
 
 const empty = {
   employee_code: '',
@@ -12,7 +12,8 @@ const empty = {
   status: 'active',
 };
 
-export default function EmployeeFormModal({ initial, onClose, onSave, departmentOptions = [] }) {
+export default function EmployeeFormModal({ initial, onClose, onSave }) {
+  const { departmentNames, positionsForDepartment } = useOrg();
   const [form, setForm] = useState(
     initial
       ? { ...empty, ...initial, start_date: initial.start_date ? String(initial.start_date).slice(0, 10) : '' }
@@ -21,18 +22,19 @@ export default function EmployeeFormModal({ initial, onClose, onSave, department
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // Chỉ cho chọn phòng ban trong danh sách của công ty (backend từ chối giá trị khác).
+  // Nhân viên cũ đang có phòng ban ngoài danh sách vẫn được hiển thị để không mất giá trị hiện tại.
   const departmentChoices = useMemo(() => {
-    const set = new Set(DEPARTMENT_NAMES);
-    departmentOptions.forEach((d) => set.add(d));
+    const set = new Set(departmentNames);
     if (form.department) set.add(form.department);
     return Array.from(set);
-  }, [departmentOptions, form.department]);
+  }, [departmentNames, form.department]);
 
   const positionChoices = useMemo(() => {
     const base = positionsForDepartment(form.department);
     if (form.position && !base.includes(form.position)) return [...base, form.position];
     return base;
-  }, [form.department, form.position]);
+  }, [form.department, form.position, positionsForDepartment]);
 
   function update(key, value) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -121,6 +123,7 @@ export default function EmployeeFormModal({ initial, onClose, onSave, department
             <select className="input" value={form.status} onChange={(e) => update('status', e.target.value)}>
               <option value="active">Đang làm việc</option>
               <option value="inactive">Đã nghỉ</option>
+              {form.status === 'pending' && <option value="pending">Chờ duyệt</option>}
             </select>
           </label>
 

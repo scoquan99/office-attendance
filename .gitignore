@@ -1,3 +1,18 @@
+# Bí mật và cấu hình riêng của từng máy
 .env
+
+# Thư viện và kết quả build
 node_modules
 dist
+
+# File sao lưu thủ công (đã chuyển vào .bak-archive/) — dùng git để lưu lịch sử thay vì file .bak
+*.bak
+*.bak[0-9]
+.bak-archive/
+
+# Công cụ / skill của trợ lý AI cục bộ, không thuộc mã nguồn dự án
+.agents/
+
+# Dữ liệu và log tạm khi chạy thử
+pgdata/
+*.log

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import ChangePasswordModal from './ChangePasswordModal.jsx';
 
 function getInitials(name) {
   if (!name) return '?';
@@ -13,6 +14,7 @@ function getInitials(name) {
 export default function Sidebar() {
   const { employee, logout } = useAuth();
   const [open, setOpen] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
   const footerRef = useRef(null);
 
   useEffect(() => {
@@ -83,6 +85,15 @@ export default function Sidebar() {
                 <span>{employee?.email || '—'}</span>
               </div>
             </div>
+            <button
+              className="account-popover-action"
+              onClick={() => {
+                setOpen(false);
+                setChangingPassword(true);
+              }}
+            >
+              Đổi mật khẩu
+            </button>
             <button className="account-popover-logout" onClick={logout}>
               Đăng xuất
             </button>
@@ -100,6 +111,8 @@ export default function Sidebar() {
           <span className="sidebar-account-chevron">{open ? '⌄' : '⌃'}</span>
         </button>
       </div>
+
+      {changingPassword && <ChangePasswordModal onClose={() => setChangingPassword(false)} />}
     </aside>
   );
 }

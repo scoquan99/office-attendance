@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { DashboardAPI } from '../api.js';
+import { dateInTz, useOfficeTz } from '../useOfficeTime.js';
 import EmployeeDetailModal from '../components/EmployeeDetailModal.jsx';
 
 const UNASSIGNED_LABEL = 'Chưa phân ban';
@@ -11,12 +12,17 @@ function statusPillClass(status) {
   if (status === 'Đi làm') return 'pill-success';
   if (status === 'Đi trễ') return 'pill-warning';
   if (status === 'Nghỉ phép') return 'pill-info';
+  if (status === 'Nghỉ không phép') return 'pill-danger';
   return 'pill-warning';
 }
 
 export default function DepartmentsPage() {
   const navigate = useNavigate();
-  const [date, setDate] = useState(dayjs().format('YYYY-MM-DD'));
+  const tz = useOfficeTz();
+  // Số thứ tự yêu cầu mới nhất: đổi ngày nhanh có thể làm kết quả cũ về sau kết quả mới, phải bỏ kết quả cũ
+  const reqRef = useRef(0);
+  // '' = "hôm nay theo giờ văn phòng": để server tự chọn ngày, giao diện hiển thị ngày lấy từ data.summary.date
+  const [date, setDate] = useState('');
   const [search, setSearch] = useState('');
   const [data, setData] = useState({ summary: null, departments: [] });
   const [loading, setLoading] = useState(true);
@@ -24,15 +30,18 @@ export default function DepartmentsPage() {
   const [detailEmployee, setDetailEmployee] = useState(null);
 
   async function load() {
+    const reqId = ++reqRef.current;
     setLoading(true);
     setError('');
     try {
       const result = await DashboardAPI.get(date);
+      if (reqId !== reqRef.current) return;
       setData(result);
     } catch (err) {
-      setError('Không tải được dữ liệu. Kiểm tra kết nối backend/PostgreSQL.');
+      if (reqId !== reqRef.current) return;
+      setError(err?.response?.data?.error || 'Không tải được dữ liệu. Kiểm tra kết nối backend/PostgreSQL.');
     } finally {
-      setLoading(false);
+      if (reqId === reqRef.current) setLoading(false);
     }
   }
 
@@ -56,7 +65,8 @@ export default function DepartmentsPage() {
       .filter((dept) => dept.employees.length > 0);
   }, [data.departments, search]);
 
-  const isToday = date === dayjs().format('YYYY-MM-DD');
+  const shownDate = date || data.summary?.date || '';
+  const isToday = !date || date === dateInTz(tz);
 
   function goToDepartment(deptName) {
     const value = deptName === UNASSIGNED_LABEL ? '__unassigned__' : deptName;
@@ -69,7 +79,7 @@ export default function DepartmentsPage() {
         <div>
           <h1>Theo phòng ban</h1>
           <p className="page-sub">
-            Số lượng nhân sự và tình trạng chấm công {isToday ? 'hôm nay' : `ngày ${dayjs(date).format('DD/MM/YYYY')}`}, chia theo từng ban.
+            Số lượng nhân sự và tình trạng chấm công {isToday ? 'hôm nay' : `ngày ${dayjs(shownDate).format('DD/MM/YYYY')}`}, chia theo từng ban.
             Nhấp vào một ban để quản lý nhân sự của ban đó.
           </p>
         </div>
@@ -78,7 +88,7 @@ export default function DepartmentsPage() {
       <div className="toolbar">
         <label className="toolbar-field">
           Ngày xem
-          <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+          <input type="date" className="input" value={shownDate} onChange={(e) => setDate(e.target.value)} />
         </label>
         <label className="toolbar-field" style={{ flex: 1, minWidth: 220 }}>
           Tìm nhân viên
@@ -107,6 +117,12 @@ export default function DepartmentsPage() {
             <div className="summary-value">{data.summary.not_checked_in}</div>
             <div className="summary-label">Chưa chấm công</div>
           </div>
+          {data.summary.on_leave > 0 && (
+            <div className="summary-stat">
+              <div className="summary-value">{data.summary.on_leave}</div>
+              <div className="summary-label">Đang nghỉ (có phép / không phép)</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -117,7 +133,9 @@ export default function DepartmentsPage() {
       ) : (
         <div className="department-grid">
           {filteredDepartments.map((dept) => {
-            const pct = dept.total ? Math.round((dept.checked_in / dept.total) * 100) : 0;
+            // Người đang nghỉ không thuộc số phải chấm công nên không tính vào mẫu số
+            const expected = dept.total - (dept.on_leave || 0);
+            const pct = expected > 0 ? Math.round((dept.checked_in / expected) * 100) : 0;
             return (
               <div
                 className="department-card department-card-clickable"
@@ -136,7 +154,7 @@ export default function DepartmentsPage() {
                   <div>
                     <div className="department-name">{dept.department}</div>
                     <div className="department-count">
-                      {dept.checked_in}/{dept.total} đã chấm công
+                      {dept.checked_in}/{expected} đã chấm công{dept.on_leave > 0 ? ` · ${dept.on_leave} nghỉ` : ''}
                     </div>
                   </div>
                   <div className="department-badge">{pct}%</div>

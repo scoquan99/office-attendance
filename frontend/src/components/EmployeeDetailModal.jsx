@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import { AttendanceAPI } from '../api.js';
+import { dateInTz, useOfficeTz } from '../useOfficeTime.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import EmployeeTasksPanel from './EmployeeTasksPanel.jsx';
 
 const STANDARD_HOURS = 8;
@@ -29,16 +31,32 @@ function statusPillClass(status) {
 }
 
 export default function EmployeeDetailModal({ employee, onClose }) {
+  const { employee: currentUser } = useAuth();
+  // Backend chỉ cho xem giờ làm của chính mình, trừ quản lý — không gọi API khi chắc chắn bị từ chối
+  const canView = Boolean(currentUser?.isManager) || employee.id === currentUser?.id;
   const [tab, setTab] = useState('hours');
-  const [filters, setFilters] = useState({
-    from: dayjs().startOf('month').format('YYYY-MM-DD'),
-    to: dayjs().format('YYYY-MM-DD'),
-  });
+  // "Hôm nay" theo múi giờ văn phòng do server cấu hình; số thứ tự yêu cầu để bỏ kết quả cũ về muộn
+  const tz = useOfficeTz();
+  const reqRef = useRef(0);
+  const [filtersReady, setFiltersReady] = useState(false);
+  const [filters, setFilters] = useState({ from: '', to: '' });
+
+  useEffect(() => {
+    if (!tz) return;
+    const today = dateInTz(tz);
+    setFilters({ from: `${today.slice(0, 7)}-01`, to: today });
+    setFiltersReady(true);
+  }, [tz]);
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   async function load() {
+    if (!canView) {
+      setLoading(false);
+      return;
+    }
+    const reqId = ++reqRef.current;
     setLoading(true);
     setError('');
     try {
@@ -47,18 +65,20 @@ export default function EmployeeDetailModal({ employee, onClose }) {
         from: filters.from,
         to: filters.to,
       });
+      if (reqId !== reqRef.current) return;
       setRecords(data);
     } catch (err) {
-      setError('Không tải được dữ liệu chấm công. Kiểm tra kết nối backend/PostgreSQL.');
+      if (reqId !== reqRef.current) return;
+      setError(err?.response?.data?.error || 'Không tải được dữ liệu chấm công. Kiểm tra kết nối backend/PostgreSQL.');
     } finally {
-      setLoading(false);
+      if (reqId === reqRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    if (filtersReady) load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.from, filters.to, employee.id]);
+  }, [filters.from, filters.to, employee.id, filtersReady]);
 
   const summary = useMemo(() => {
     let totalHours = 0;
@@ -112,6 +132,8 @@ export default function EmployeeDetailModal({ employee, onClose }) {
 
         {tab === 'tasks' ? (
           <EmployeeTasksPanel employeeId={employee.id} />
+        ) : !canView ? (
+          <div className="empty-row">Chỉ quản lý hoặc chính nhân viên này mới xem được giờ làm.</div>
         ) : (
           <>
         <div className="toolbar">

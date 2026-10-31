@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import { AttendanceAPI, EmployeesAPI } from '../api.js';
+import { dateInTz, timeInTz, useOfficeTz } from '../useOfficeTime.js';
+import { useAuth } from '../context/AuthContext.jsx';
 
 function statusPillClass(status) {
   if (status === 'Đi làm') return 'pill-success';
@@ -10,20 +12,31 @@ function statusPillClass(status) {
 }
 
 export default function AttendancePage() {
+  const { employee: currentUser } = useAuth();
+  // Quyền do backend quyết định (cờ isManager). Nhân viên thường chỉ chấm công cho chính mình.
+  const isManager = Boolean(currentUser?.isManager);
   const [now, setNow] = useState(dayjs());
   const [employees, setEmployees] = useState([]);
-  const [selectedEmployee, setSelectedEmployee] = useState('');
+  const [selectedEmployee, setSelectedEmployee] = useState(currentUser?.id ? String(currentUser.id) : '');
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [punchMessage, setPunchMessage] = useState('');
 
-  const [filters, setFilters] = useState({
-    from: dayjs().startOf('month').format('YYYY-MM-DD'),
-    to: dayjs().format('YYYY-MM-DD'),
-    employee_id: '',
-    department: '',
-  });
+  // "Hôm nay" và đồng hồ theo múi giờ văn phòng do server cấu hình, không theo đồng hồ của trình duyệt
+  const tz = useOfficeTz();
+  // Số thứ tự yêu cầu mới nhất: đổi bộ lọc nhanh có thể làm kết quả cũ về sau kết quả mới, phải bỏ kết quả cũ
+  const reqRef = useRef(0);
+  const [filtersReady, setFiltersReady] = useState(false);
+  const [filters, setFilters] = useState({ from: '', to: '', employee_id: '', department: '' });
+
+  // Khi đã biết múi giờ văn phòng: đặt mặc định "từ đầu tháng đến hôm nay" rồi mới tải dữ liệu lần đầu
+  useEffect(() => {
+    if (!tz) return;
+    const today = dateInTz(tz);
+    setFilters((f) => ({ ...f, from: `${today.slice(0, 7)}-01`, to: today }));
+    setFiltersReady(true);
+  }, [tz]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(dayjs()), 1000);
@@ -35,6 +48,7 @@ export default function AttendancePage() {
   }, []);
 
   async function loadRecords() {
+    const reqId = ++reqRef.current;
     setLoading(true);
     setError('');
     try {
@@ -44,18 +58,20 @@ export default function AttendancePage() {
       if (filters.employee_id) params.employee_id = filters.employee_id;
       if (filters.department) params.department = filters.department;
       const data = await AttendanceAPI.list(params);
+      if (reqId !== reqRef.current) return;
       setRecords(data);
     } catch (err) {
-      setError('Không tải được dữ liệu chấm công. Kiểm tra kết nối backend/PostgreSQL.');
+      if (reqId !== reqRef.current) return;
+      setError(err?.response?.data?.error || 'Không tải được dữ liệu chấm công. Kiểm tra kết nối backend/PostgreSQL.');
     } finally {
-      setLoading(false);
+      if (reqId === reqRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    loadRecords();
+    if (filtersReady) loadRecords();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  }, [filters, filtersReady]);
 
   const departments = useMemo(
     () => [...new Set(employees.map((e) => e.department).filter(Boolean))],
@@ -65,8 +81,11 @@ export default function AttendancePage() {
   async function handleCheckin() {
     if (!selectedEmployee) return setPunchMessage('Vui lòng chọn nhân viên trước.');
     try {
-      await AttendanceAPI.checkin(selectedEmployee);
-      setPunchMessage('Đã chấm công vào lúc ' + dayjs().format('HH:mm:ss'));
+      const row = await AttendanceAPI.checkin(selectedEmployee);
+      // Giờ lấy từ bản ghi server trả về (giờ văn phòng), không lấy từ đồng hồ trình duyệt
+      setPunchMessage(
+        'Đã chấm công vào lúc ' + String(row?.check_in ?? timeInTz(tz)).slice(0, 8) + (row?.status === 'Đi trễ' ? ' (đi trễ)' : '')
+      );
       loadRecords();
     } catch (err) {
       setPunchMessage(err?.response?.data?.error || 'Có lỗi khi chấm công vào.');
@@ -76,8 +95,8 @@ export default function AttendancePage() {
   async function handleCheckout() {
     if (!selectedEmployee) return setPunchMessage('Vui lòng chọn nhân viên trước.');
     try {
-      await AttendanceAPI.checkout(selectedEmployee);
-      setPunchMessage('Đã chấm công ra lúc ' + dayjs().format('HH:mm:ss'));
+      const row = await AttendanceAPI.checkout(selectedEmployee);
+      setPunchMessage('Đã chấm công ra lúc ' + String(row?.check_out ?? timeInTz(tz)).slice(0, 8));
       loadRecords();
     } catch (err) {
       setPunchMessage(err?.response?.data?.error || 'Có lỗi khi chấm công ra.');
@@ -86,17 +105,33 @@ export default function AttendancePage() {
 
   async function handleDelete(id) {
     if (!window.confirm('Xóa bản ghi chấm công này?')) return;
-    await AttendanceAPI.remove(id);
-    loadRecords();
+    try {
+      await AttendanceAPI.remove(id);
+      loadRecords();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Không xóa được bản ghi chấm công.');
+    }
   }
 
-  function handleExport() {
+  async function handleExport() {
     const params = {};
     if (filters.from) params.from = filters.from;
     if (filters.to) params.to = filters.to;
     if (filters.employee_id) params.employee_id = filters.employee_id;
     if (filters.department) params.department = filters.department;
-    window.open(AttendanceAPI.exportUrl(params), '_blank');
+    try {
+      const blob = await AttendanceAPI.exportXlsx(params);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `bang-cham-cong_${dateInTz(tz)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Không xuất được file Excel. Vui lòng thử lại.');
+    }
   }
 
   return (
@@ -110,11 +145,17 @@ export default function AttendancePage() {
 
       <div className="punch-card">
         <div className="punch-clock">
-          <div className="punch-date">{now.format('dddd, DD/MM/YYYY')}</div>
-          <div className="punch-time">{now.format('HH:mm:ss')}</div>
+          <div className="punch-date">{dayjs(dateInTz(tz, now.toDate())).format('dddd, DD/MM/YYYY')}</div>
+          <div className="punch-time">{timeInTz(tz, now.toDate())}</div>
         </div>
         <div className="punch-controls">
-          <select className="input" value={selectedEmployee} onChange={(e) => setSelectedEmployee(e.target.value)}>
+          <select
+            className="input"
+            value={selectedEmployee}
+            onChange={(e) => setSelectedEmployee(e.target.value)}
+            disabled={!isManager}
+            title={isManager ? undefined : 'Bạn chỉ được chấm công cho chính mình'}
+          >
             <option value="">— Chọn nhân viên —</option>
             {employees.map((e) => (
               <option key={e.id} value={e.id}>
@@ -149,6 +190,9 @@ export default function AttendancePage() {
             onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
           />
         </label>
+        {/* Nhân viên thường chỉ xem chấm công của chính mình nên không có bộ lọc theo người / phòng ban */}
+        {isManager && (
+          <>
         <label className="toolbar-field">
           Nhân viên
           <select
@@ -175,7 +219,12 @@ export default function AttendancePage() {
             ))}
           </select>
         </label>
-        <button className="btn btn-accent" onClick={handleExport}>⬇ Xuất Excel</button>
+          </>
+        )}
+        {/* Backend chỉ cho quản lý xuất Excel */}
+        {isManager && (
+          <button className="btn btn-accent" onClick={handleExport}>⬇ Xuất Excel</button>
+        )}
       </div>
 
       {error && <div className="alert alert-danger">{error}</div>}
@@ -217,7 +266,9 @@ export default function AttendancePage() {
                   <td><span className={`pill ${statusPillClass(r.status)}`}>{r.status}</span></td>
                   <td>{r.note || '—'}</td>
                   <td className="row-actions">
-                    <button className="btn btn-ghost btn-danger" onClick={() => handleDelete(r.id)}>Xóa</button>
+                    {isManager && (
+                      <button className="btn btn-ghost btn-danger" onClick={() => handleDelete(r.id)}>Xóa</button>
+                    )}
                   </td>
                 </tr>
               ))

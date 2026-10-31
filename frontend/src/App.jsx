@@ -1,6 +1,7 @@
 import { Routes, Route } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 import Sidebar from './components/Sidebar.jsx';
+import ChangePasswordModal from './components/ChangePasswordModal.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import RegisterPage from './pages/RegisterPage.jsx';
 import AttendancePage from './pages/AttendancePage.jsx';
@@ -19,6 +20,11 @@ function AppShell() {
         <Route path="*" element={<LoginPage />} />
       </Routes>
     );
+  }
+
+  // Đang dùng mật khẩu tạm do quản lý cấp: chỉ hiện màn hình đổi mật khẩu (backend cũng khóa mọi API khác)
+  if (employee.must_change_password) {
+    return <ChangePasswordModal forced />;
   }
 
   return (

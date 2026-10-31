@@ -1130,3 +1130,32 @@ button, input, select {
   .sidebar-brand .brand-name { display: none; }
   .sidebar-brand { gap: 0; }
 }
+
+
+/* Nút hành động bình thường trong popover tài khoản (ví dụ Đổi mật khẩu), không tô đỏ như Đăng xuất */
+.account-popover-action {
+  width: 100%;
+  background: var(--info-soft);
+  color: var(--info);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 9px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.account-popover-action:hover {
+  filter: brightness(0.96);
+}
+
+.alert-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.alert-warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}

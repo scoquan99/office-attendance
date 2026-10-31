@@ -1,6 +1,9 @@
-// Cơ cấu Phòng ban → Chức vụ mẫu, trích từ tài liệu
+// Cơ cấu Phòng ban → Chức vụ của công ty, trích từ tài liệu
 // "Cơ cấu tổ chức công ty hoàn chỉnh" do người dùng cung cấp.
-// Dùng để gợi ý lựa chọn khi thêm/sửa nhân viên.
+//
+// ĐÂY LÀ NGUỒN DUY NHẤT: frontend lấy danh sách này qua GET /api/org (không giữ bản sao riêng),
+// và backend dùng chính nó để kiểm tra phòng ban / chức vụ khi đăng ký, thêm, sửa nhân viên.
+// Mọi chức vụ trong MANAGER_POSITIONS (managerPositions.js) phải có mặt ở đây.
 
 export const ORG_STRUCTURE = [
   {
@@ -139,4 +142,18 @@ export const DEPARTMENT_NAMES = ORG_STRUCTURE.map((d) => d.department);
 
 export function positionsForDepartment(department) {
   return ORG_STRUCTURE.find((d) => d.department === department)?.positions || [];
+}
+
+// Kiểm tra cặp (phòng ban, chức vụ). Chuỗi rỗng / null / undefined = "chưa chọn".
+// Trả về chuỗi lỗi, hoặc null nếu hợp lệ.
+export function checkOrgPair(department, position) {
+  const dep = department || null;
+  const pos = position || null;
+
+  if (dep && !DEPARTMENT_NAMES.includes(dep)) return 'Phòng ban không hợp lệ';
+  if (pos) {
+    if (!dep) return 'Vui lòng chọn phòng ban trước khi chọn chức vụ';
+    if (!positionsForDepartment(dep).includes(pos)) return 'Chức vụ không thuộc phòng ban đã chọn';
+  }
+  return null;
 }

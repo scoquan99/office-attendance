@@ -4,6 +4,8 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 export default function EmployeeTasksPanel({ employeeId }) {
   const { employee: currentUser } = useAuth();
+  // Backend chỉ cho xem/sửa việc của chính mình, trừ quản lý — không gọi API khi chắc chắn sẽ bị từ chối
+  const canUse = Boolean(currentUser?.isManager) || Number(employeeId) === Number(currentUser?.id);
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -18,16 +20,17 @@ export default function EmployeeTasksPanel({ employeeId }) {
       const data = await TasksAPI.list(employeeId);
       setTasks(data);
     } catch (err) {
-      setError('Không tải được danh sách công việc.');
+      setError(err?.response?.data?.error || 'Không tải được danh sách công việc.');
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    if (canUse) load();
+    else setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId]);
+  }, [employeeId, canUse]);
 
   async function handleAdd(e) {
     e.preventDefault();
@@ -40,26 +43,45 @@ export default function EmployeeTasksPanel({ employeeId }) {
       setPriority(false);
       load();
     } catch (err) {
-      setError('Không thêm được công việc.');
+      setError(err?.response?.data?.error || 'Không thêm được công việc.');
     } finally {
       setSaving(false);
     }
   }
 
-  async function toggleDone(task) {
-    await TasksAPI.update(task.id, { is_done: !task.is_done });
-    load();
+  // Bọc mọi thao tác sửa/xóa: lỗi (ví dụ 403) hiện thành thông báo thay vì là lỗi không được xử lý
+  async function runAction(action, fallbackMessage) {
+    setError('');
+    try {
+      await action();
+      load();
+    } catch (err) {
+      setError(err?.response?.data?.error || fallbackMessage);
+    }
   }
 
-  async function togglePriority(task) {
-    await TasksAPI.update(task.id, { is_priority: !task.is_priority });
-    load();
+  function toggleDone(task) {
+    return runAction(() => TasksAPI.update(task.id, { is_done: !task.is_done }), 'Không cập nhật được công việc.');
   }
 
-  async function handleDelete(task) {
-    if (!window.confirm(`Xóa công việc "${task.title}"?`)) return;
-    await TasksAPI.remove(task.id);
-    load();
+  function togglePriority(task) {
+    return runAction(
+      () => TasksAPI.update(task.id, { is_priority: !task.is_priority }),
+      'Không cập nhật được công việc.'
+    );
+  }
+
+  function handleDelete(task) {
+    if (!window.confirm(`Xóa công việc "${task.title}"?`)) return undefined;
+    return runAction(() => TasksAPI.remove(task.id), 'Không xóa được công việc.');
+  }
+
+  if (!canUse) {
+    return (
+      <div className="tasks-panel">
+        <div className="empty-row">Chỉ quản lý hoặc chính nhân viên này mới xem được công việc.</div>
+      </div>
+    );
   }
 
   const pending = tasks.filter((t) => !t.is_done);

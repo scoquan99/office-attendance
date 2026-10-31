@@ -1,3 +1,7 @@
 node_modules
 .env
+.env.*
 npm-debug.log
+*.bak
+*.bak2
+*.bak3

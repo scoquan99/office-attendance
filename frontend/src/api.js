@@ -18,7 +18,12 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err?.response?.status === 401) {
+    // 401 từ chính màn hình đăng nhập / đăng ký chỉ có nghĩa "sai thông tin", KHÔNG phải phiên hết hạn:
+    // nếu tải lại trang ở đây thì thông báo lỗi bị xóa trước khi người dùng kịp đọc.
+    const url = err?.config?.url || '';
+    const isAuthAttempt = url.startsWith('/auth/login') || url.startsWith('/auth/register');
+    const hadSession = Boolean(sessionStorage.getItem(TOKEN_KEY));
+    if (err?.response?.status === 401 && hadSession && !isAuthAttempt) {
       sessionStorage.removeItem(TOKEN_KEY);
       sessionStorage.removeItem('office_attendance_employee');
       window.location.reload();
@@ -32,6 +37,9 @@ export const AuthAPI = {
   login: (employee_code, password) => api.post('/auth/login', { employee_code, password }).then((r) => r.data),
   register: (payload) => api.post('/auth/register', payload).then((r) => r.data),
   me: () => api.get('/auth/me').then((r) => r.data),
+  // Đổi mật khẩu → backend trả token MỚI (token cũ mất hiệu lực)
+  changePassword: (current_password, new_password) =>
+    api.post('/auth/change-password', { current_password, new_password }).then((r) => r.data),
 };
 
 export const EmployeesAPI = {
@@ -40,6 +48,8 @@ export const EmployeesAPI = {
   create: (data) => api.post('/employees', data).then((r) => r.data),
   update: (id, data) => api.put(`/employees/${id}`, data).then((r) => r.data),
   remove: (id) => api.delete(`/employees/${id}`),
+  // Quản lý cấp lại mật khẩu tạm → { temporary_password } (chỉ hiện một lần)
+  resetPassword: (id) => api.post(`/employees/${id}/reset-password`).then((r) => r.data),
 };
 
 export const DashboardAPI = {
@@ -52,10 +62,20 @@ export const AttendanceAPI = {
   checkout: (employee_id) => api.post('/attendance/checkout', { employee_id }).then((r) => r.data),
   save: (data) => api.post('/attendance', data).then((r) => r.data),
   remove: (id) => api.delete(`/attendance/${id}`),
-  exportUrl: (params) => {
-    const qs = new URLSearchParams(params).toString();
-    return `/api/attendance/export/xlsx${qs ? `?${qs}` : ''}`;
-  },
+  // Tải file Excel qua axios (có gắn Authorization) dưới dạng blob.
+  // Không dùng window.open vì trình duyệt không gửi kèm header Authorization.
+  exportXlsx: (params) =>
+    api.get('/attendance/export/xlsx', { params, responseType: 'blob' }).then((r) => r.data),
+};
+
+// Danh sách phòng ban → chức vụ và chức vụ quản lý do backend trả ra (công khai, dùng cả ở trang đăng ký)
+export const OrgAPI = {
+  get: () => api.get('/org').then((r) => r.data),
+};
+
+// Múi giờ văn phòng và "hôm nay" theo server (công khai)
+export const MetaAPI = {
+  get: () => api.get('/meta').then((r) => r.data),
 };
 
 export const TasksAPI = {

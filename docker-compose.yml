@@ -4,10 +4,11 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Hãy đặt POSTGRES_PASSWORD trong file .env (xem .env.docker.example)}
       POSTGRES_DB: ${POSTGRES_DB:-office_attendance}
+    # Chỉ mở cho chính máy này (127.0.0.1) — không để database lộ ra mạng.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Chỉ chạy 1 lần duy nhất, khi volume pgdata được tạo mới hoàn toàn
@@ -30,11 +31,22 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: ${POSTGRES_USER:-postgres}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_NAME: ${POSTGRES_DB:-office_attendance}
-      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-random-secret}
+      NODE_ENV: production
+      # Bắt buộc phải đặt trong file .env (cạnh docker-compose.yml) — không có giá trị mặc định.
+      JWT_SECRET: ${JWT_SECRET:?Hãy đặt JWT_SECRET trong file .env (xem .env.docker.example)}
+      # Backend đứng sau nginx (1 lớp proxy) nên cần tin X-Forwarded-For để rate limit đúng IP.
+      TRUST_PROXY: 1
+      # Quy tắc "Đi trễ": vào sau giờ bắt đầu + số phút châm chước là đi trễ (theo giờ văn phòng OFFICE_TZ).
+      WORK_START_TIME: ${WORK_START_TIME:-08:00}
+      LATE_GRACE_MINUTES: ${LATE_GRACE_MINUTES:-0}
+      OFFICE_TZ: ${OFFICE_TZ:-Asia/Ho_Chi_Minh}
+    # Người dùng truy cập qua frontend (nginx ở cổng FRONTEND_PORT) và nginx gọi backend trong mạng nội bộ Docker.
+    # Cổng này chỉ mở cho chính máy này: nếu mở ra ngoài, ai gọi thẳng cũng có thể giả header X-Forwarded-For
+    # (vì TRUST_PROXY=1) để né giới hạn số lần đăng nhập.
     ports:
-      - "${BACKEND_PORT:-4000}:4000"
+      - "127.0.0.1:${BACKEND_PORT:-4000}:4000"
 
   frontend:
     build: ./frontend

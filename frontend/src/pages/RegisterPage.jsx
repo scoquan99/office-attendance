@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { DEPARTMENT_NAMES, positionsForDepartment } from '../orgStructure.js';
+import { useOrg } from '../useOrg.js';
 
 const emptyForm = {
   full_name: '',
@@ -14,15 +14,19 @@ const emptyForm = {
 };
 
 export default function RegisterPage() {
-  const { register, completeAuth } = useAuth();
+  const { register } = useAuth();
   const navigate = useNavigate();
+  const { departmentNames, positionsForDepartment, error: orgLoadError } = useOrg();
 
   const [form, setForm] = useState(emptyForm);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null); // { token, employee }
+  const [result, setResult] = useState(null); // { pending, employee }
 
-  const positionChoices = useMemo(() => positionsForDepartment(form.department), [form.department]);
+  const positionChoices = useMemo(
+    () => positionsForDepartment(form.department),
+    [form.department, positionsForDepartment]
+  );
 
   function update(key, value) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -32,8 +36,8 @@ export default function RegisterPage() {
     e.preventDefault();
     setError('');
 
-    if (form.password.length < 6) {
-      setError('Mật khẩu cần ít nhất 6 ký tự.');
+    if (form.password.length < 8) {
+      setError('Mật khẩu cần ít nhất 8 ký tự.');
       return;
     }
     if (form.password !== form.confirmPassword) {
@@ -59,8 +63,7 @@ export default function RegisterPage() {
     }
   }
 
-  function handleContinue() {
-    completeAuth(result);
+  function handleBackToLogin() {
     navigate('/', { replace: true });
   }
 
@@ -76,17 +79,18 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          <h1>Đăng ký thành công!</h1>
+          <h1>Đã gửi đăng ký!</h1>
           <p className="register-success-text">
-            Chào mừng <strong>{result.employee.full_name}</strong> — mã nhân viên của bạn là:
+            Cảm ơn <strong>{result.employee.full_name}</strong>. Mã nhân viên của bạn là:
           </p>
           <div className="register-success-code">{result.employee.employee_code}</div>
           <p className="register-success-hint">
-            Hãy ghi nhớ mã này — dùng cùng mật khẩu vừa tạo để đăng nhập những lần sau.
+            Tài khoản đang <strong>chờ quản lý phê duyệt</strong>. Sau khi được duyệt, hãy đăng nhập bằng mã này và mật khẩu
+            vừa tạo. Bạn chưa thể đăng nhập cho tới lúc đó.
           </p>
 
-          <button className="btn btn-accent login-submit" onClick={handleContinue}>
-            Vào ứng dụng
+          <button className="btn btn-accent login-submit" onClick={handleBackToLogin}>
+            Về trang đăng nhập
           </button>
         </div>
       </div>
@@ -142,7 +146,7 @@ export default function RegisterPage() {
             required
           >
             <option value="">— Chọn phòng ban —</option>
-            {DEPARTMENT_NAMES.map((d) => (
+            {departmentNames.map((d) => (
               <option key={d} value={d}>{d}</option>
             ))}
           </select>
@@ -183,7 +187,7 @@ export default function RegisterPage() {
           />
         </label>
 
-        {error && <div className="alert alert-danger">{error}</div>}
+        {(error || orgLoadError) && <div className="alert alert-danger">{error || orgLoadError}</div>}
 
         <button type="submit" className="btn btn-accent login-submit" disabled={loading}>
           {loading ? 'Đang đăng ký...' : 'Đăng ký'}
