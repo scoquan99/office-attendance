@@ -69,23 +69,28 @@ function buildFilters(query) {
 }
 
 // Kiểm tra được phép chấm công cho nhân viên này: có quyền, nhân viên tồn tại và còn đang làm việc.
-// Trả về true nếu hợp lệ; ngược lại ĐÃ gửi phản hồi lỗi và trả về false.
+// Trả về { allowed: true } nếu hợp lệ; ngược lại trả về { allowed: false, status, error }.
 // Quyền được kiểm tra TRƯỚC mọi truy vấn khác để người không có quyền không dò được dữ liệu của người khác.
-async function checkPunchAllowed(req, res, employeeId) {
+// Khi được truyền `client` (transaction), dùng client đó thay vì pool để giữ nguyên phiên giao dịch.
+async function checkPunchAllowed(req, employeeId, client) {
   if (!canAccessEmployee(req, employeeId)) {
-    res.status(403).json({ error: 'Bạn chỉ được chấm công cho chính mình' });
-    return false;
+    return { allowed: false, status: 403, error: 'Bạn chỉ được chấm công cho chính mình' };
   }
-  const { rows: emptyRows } = await pool.query('SELECT status FROM employees WHERE id = $1', [employeeId]);
+  const db = client || pool;
+  // FOR SHARE khoá hàng employees trong transaction để đảm bảo trạng thái không thay đổi
+  // giữa lúc kiểm tra và lúc ghi attendance.
+  const lockClause = client ? 'FOR SHARE' : '';
+  const { rows: emptyRows } = await db.query(
+    `SELECT status FROM employees WHERE id = $1 ${lockClause}`,
+    [employeeId]
+  );
   if (!emptyRows.length) {
-    res.status(404).json({ error: 'Không tìm thấy nhân viên' });
-    return false;
+    return { allowed: false, status: 404, error: 'Không tìm thấy nhân viên' };
   }
   if (emptyRows[0].status !== 'active') {
-    res.status(400).json({ error: 'Nhân viên đã nghỉ việc, không thể chấm công' });
-    return false;
+    return { allowed: false, status: 400, error: 'Nhân viên đã nghỉ việc, không thể chấm công' };
   }
-  return true;
+  return { allowed: true };
 }
 
 // GET /api/attendance?from=&to=&employee_id=&department=
@@ -111,11 +116,20 @@ router.get('/', async (req, res, next) => {
 
 // POST /api/attendance/checkin { employee_id }
 // Nhân viên thường chỉ được chấm công cho CHÍNH MÌNH; quản lý được chấm công hộ người khác.
+// Toàn bộ kiểm tra quyền + upsert nằm trong MỘT transaction để loại bỏ race condition (TOCTOU).
 router.post('/checkin', async (req, res, next) => {
+  const client = await pool.connect();
   try {
     const employeeId = parseId(req.body?.employee_id);
     if (!employeeId) return res.status(400).json({ error: 'Thiếu hoặc sai employee_id' });
-    if (!(await checkPunchAllowed(req, res, employeeId))) return;
+
+    await client.query('BEGIN');
+
+    const check = await checkPunchAllowed(req, employeeId, client);
+    if (!check.allowed) {
+      await client.query('ROLLBACK');
+      return res.status(check.status).json({ error: check.error });
+    }
 
     // Tính ngày và giờ một lần duy nhất để tránh lệch khi request đến đúng lúc sang ngày mới
     const today = todayStr();
@@ -126,7 +140,7 @@ router.post('/checkin', async (req, res, next) => {
 
     // Upsert nguyên tử: tạo bản ghi nếu chưa có, ghi giờ vào nếu chưa chấm công.
     // COALESCE giữ giờ vào cũ nếu đã có → hai request đồng thời không ghi đè nhau.
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `INSERT INTO attendance (employee_id, work_date, check_in, status)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (employee_id, work_date)
@@ -140,36 +154,56 @@ router.post('/checkin', async (req, res, next) => {
       [employeeId, today, now, status]
     );
 
+    await client.query('COMMIT');
+
     // Nếu giờ vào trả về khác giờ vừa gửi → bản ghi đã có check_in từ trước
     if (rows[0].check_in !== now) {
       return res.status(400).json({ error: 'Nhân viên đã chấm công vào hôm nay' });
     }
     res.json(rows[0]);
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     next(err);
+  } finally {
+    client.release();
   }
 });
 
 // POST /api/attendance/checkout { employee_id }
+// Toàn bộ kiểm tra quyền + update nằm trong MỘT transaction để loại bỏ race condition (TOCTOU).
 router.post('/checkout', async (req, res, next) => {
+  const client = await pool.connect();
   try {
     const employeeId = parseId(req.body?.employee_id);
     if (!employeeId) return res.status(400).json({ error: 'Thiếu hoặc sai employee_id' });
-    if (!(await checkPunchAllowed(req, res, employeeId))) return;
+
+    await client.query('BEGIN');
+
+    const check = await checkPunchAllowed(req, employeeId, client);
+    if (!check.allowed) {
+      await client.query('ROLLBACK');
+      return res.status(check.status).json({ error: check.error });
+    }
 
     const today = todayStr();
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `UPDATE attendance SET check_out = $1
        WHERE employee_id = $2 AND work_date = $3 AND check_in IS NOT NULL AND check_out IS NULL
        RETURNING *`,
       [timeStr(), employeeId, today]
     );
+
+    await client.query('COMMIT');
+
     if (!rows.length) {
       return res.status(400).json({ error: 'Nhân viên chưa chấm công vào trong hôm nay' });
     }
     res.json(rows[0]);
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     next(err);
+  } finally {
+    client.release();
   }
 });
 
